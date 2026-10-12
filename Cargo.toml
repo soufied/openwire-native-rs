@@ -1,0 +1,26 @@
+[package]
+name = "openwire"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.77"
+license = "GPL-3.0-or-later"
+description = "Native soundboard and real-time voice effects processor for Linux (PipeWire)"
+
+[dependencies]
+anyhow = "1"
+dirs = "6"
+eframe = { version = "0.31", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }
+ksni = "0.2"
+libspa = "0.10"
+pipewire = "0.10"
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
+ringbuf = "0.4"
+rustfft = "6"
+serde = { version = "1", features = ["derive"] }
+symphonia = { version = "0.5", features = ["all"] }
+toml = "0.8"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"

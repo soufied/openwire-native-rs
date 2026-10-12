@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OpenWire
+GenericName=Soundboard
+Comment=Native soundboard and real-time voice effects processor
+Exec=openwire
+Icon=openwire
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
+Keywords=soundboard;soundpad;audio;pipewire;voice;
+StartupWMClass=openwire

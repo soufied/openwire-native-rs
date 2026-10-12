@@ -1,0 +1,13 @@
+post_install() {
+  echo ""
+  echo "  OpenWire installed."
+  echo "  Keybinds are read from /dev/input. Add your user to the 'input' group,"
+  echo "  then log out and back in:"
+  echo "      sudo usermod -aG input \$USER"
+  echo "  The tray icon needs a StatusNotifier host (KDE Plasma has one built in)."
+  echo ""
+}
+
+post_upgrade() {
+  post_install
+}

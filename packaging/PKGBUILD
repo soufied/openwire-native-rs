@@ -1,0 +1,44 @@
+
+pkgname=openwire
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Native soundboard and real-time voice effects processor for Linux (PipeWire)"
+arch=('x86_64')
+url="https://github.com/soufied/openwire-native-rs"
+license=('GPL-3.0-or-later')
+depends=(
+  'pipewire'
+  'libxkbcommon'
+  'wayland'
+  'libx11'
+  'libxcursor'
+  'libxrandr'
+  'libxi'
+  'libglvnd'
+  'dbus'
+)
+makedepends=('rust' 'cargo' 'clang' 'pkgconf')
+optdepends=(
+  'xdg-desktop-portal: native file dialogs'
+  'xdg-desktop-portal-kde: native file dialogs on KDE Plasma'
+  'xdg-desktop-portal-gnome: native file dialogs on GNOME'
+)
+install=openwire.install
+source=()
+sha256sums=()
+
+package() {
+  local root="$startdir/.."
+  local bin="$root/target/release/$pkgname"
+
+  if [[ ! -x "$bin" ]]; then
+    error "Release binary not found: $bin"
+    error "Run ./build.sh from the packaging directory to compile and package."
+    return 1
+  fi
+
+  install -Dm755 "$bin" "$pkgdir/usr/bin/$pkgname"
+  install -Dm644 "$startdir/openwire.desktop" "$pkgdir/usr/share/applications/$pkgname.desktop"
+  install -Dm644 "$root/assets/openwire.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/$pkgname.svg"
+  install -Dm644 "$root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

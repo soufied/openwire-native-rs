@@ -1,0 +1,9 @@
+/target
+*.pkg.tar.zst
+/packaging/pkg/
+/packaging/src/
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
