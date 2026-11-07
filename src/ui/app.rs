@@ -2,21 +2,23 @@ use crate::input::keybinds as hotkeys;
 use crate::config::paths;
 use std::sync::mpsc;
 use eframe::egui;
-use eframe::egui::{Color32, RichText, ViewportCommand};
+use eframe::egui::{Align2, Color32, FontId, RichText, ViewportCommand};
+use std::path::PathBuf;
 use crate::audio::dsp::{DspSnapshot, Params};
 use crate::audio::engine::{CommandSender, InputDevice, Meters};
 use crate::audio::mixer::MixerControl;
 use crate::board::{Pad, Soundboard};
-use crate::config::settings::{BoardLayout, Settings};
+use crate::config::settings::{AppMode, BoardLayout, Settings};
 use crate::input::keybinds::{Bindings, CaptureSlot, Target};
-use crate::playback::{Action, Sampler};
+use crate::playback::{Action, ImportReport, Sampler};
 use crate::presets::{ORDINARY_VOICE, PresetStore};
 use crate::system::tray::{TrayCmd, Wake};
 use crate::system::window::{hide_to_tray, show_window};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
-use super::theme::{ACCENT, DANGER, MUTED, PANEL, apply_style};
+use super::theme::{ACCENT, CARD, DANGER, MUTED, PANEL, TEXT, apply_style};
 use super::widgets::{display_path, dot_label, fmt_time, format_duration, meter, nav_button};
 
 pub struct Wiring {
@@ -33,6 +35,13 @@ pub struct Wiring {
     pub inputs: Arc<Mutex<Vec<InputDevice>>>,
     pub engine_running: bool,
     pub capture: CaptureSlot,
+}
+
+pub(crate) struct ImportJob {
+    pub(crate) label: String,
+    pub(crate) total: Arc<AtomicUsize>,
+    pub(crate) done: Arc<AtomicUsize>,
+    pub(crate) rx: Receiver<Result<ImportReport, String>>,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -99,7 +108,11 @@ pub struct App {
     pub(crate) capture_slot: CaptureSlot,
     pub(crate) capture: Option<(Target, Receiver<u16>)>,
     pub(crate) renaming: bool,
+    pub(crate) rename_focus: bool,
     pub(crate) confirm_delete: Option<usize>,
+    pub(crate) app_mode: AppMode,
+    pub(crate) search: String,
+    pub(crate) import_job: Option<ImportJob>,
 }
 
 impl eframe::App for App {
@@ -114,6 +127,7 @@ impl eframe::App for App {
             hide_to_tray(ctx);
         }
 
+        self.handle_dropped(ctx);
         egui::TopBottomPanel::top("header")
             .frame(egui::Frame::default().fill(PANEL).inner_margin(egui::Margin::symmetric(14, 10)))
             .show(ctx, |ui| self.header(ui));
@@ -137,6 +151,11 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().inner_margin(egui::Margin::symmetric(16, 12)))
             .show(ctx, |ui| {
+                self.import_banner(ui);
+                if self.view == View::Board && self.app_mode == AppMode::Soundpad {
+                    self.soundpad_view(ui);
+                    return;
+                }
                 egui::ScrollArea::vertical().show(ui, |ui| match self.view {
                     View::Board => self.board_view(ui),
                     View::Voice => self.voice_view(ui),
@@ -159,6 +178,7 @@ impl App {
         let snap = w.params.snapshot();
         let board_layout = w.settings.soundboard_layout;
         let group_draft = board.banks.first().map(|b| b.name.clone()).unwrap_or_default();
+        let app_mode = w.settings.app_mode;
         let mut app = Self {
             sampler: w.sampler,
             actions: w.actions,
@@ -192,7 +212,11 @@ impl App {
             capture_slot: w.capture,
             capture: None,
             renaming: false,
+            rename_focus: false,
             confirm_delete: None,
+            app_mode,
+            search: String::new(),
+            import_job: None,
         };
         app.select(0);
         app
@@ -264,6 +288,26 @@ impl App {
             self.refresh();
             self.select(self.selected);
         }
+        let finished = self.import_job.as_ref().and_then(|job| job.rx.try_recv().ok());
+        if let Some(result) = finished {
+            self.import_job = None;
+            self.status = match result {
+                Ok(report) if report.added == 0 && report.failed.is_empty() => {
+                    "No supported audio files found".into()
+                }
+                Ok(report) => match report.failed.first() {
+                    None => format!("Added {} sound(s)", report.added),
+                    Some(first) => format!(
+                        "Added {} sound(s), {} failed. First error: {first}",
+                        report.added,
+                        report.failed.len()
+                    ),
+                },
+                Err(err) => format!("Import error: {err}"),
+            };
+            self.refresh();
+            self.select(self.selected);
+        }
         let outcome = self.waveform_rx.as_ref().and_then(|rx| rx.try_recv().ok());
         if let Some(result) = outcome {
             self.waveform_rx = None;
@@ -293,8 +337,79 @@ impl App {
     pub(crate) fn save_settings(&mut self) {
         self.settings.monitor_enabled = self.snap.monitor_enabled;
         self.settings.ducking_enabled = self.snap.ducking_enabled;
+        self.settings.voice_enabled = self.snap.voice_enabled;
         if let Err(err) = self.settings.save() {
             self.status = format!("Settings save error: {err:#}");
+        }
+    }
+
+    pub(crate) fn import_banner(&self, ui: &mut egui::Ui) {
+        let Some(job) = &self.import_job else {
+            return;
+        };
+        let total = job.total.load(Ordering::Relaxed);
+        let done = job.done.load(Ordering::Relaxed);
+        egui::Frame::default()
+            .fill(CARD)
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    if total == 0 {
+                        ui.label(RichText::new(format!("Scanning {}…", job.label)).color(TEXT));
+                    } else {
+                        ui.label(
+                            RichText::new(format!("Importing {} · {done} of {total}", job.label)).color(TEXT),
+                        );
+                    }
+                });
+                let bar = if total == 0 {
+                    egui::ProgressBar::new(0.0).animate(true)
+                } else {
+                    egui::ProgressBar::new(done as f32 / total as f32).show_percentage()
+                };
+                ui.add(bar.desired_width(ui.available_width()));
+            });
+        ui.add_space(8.0);
+    }
+
+    pub(crate) fn handle_dropped(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            if self.view == View::Board {
+                let bank = self.bank;
+                self.import_paths(bank, dropped);
+            } else {
+                self.status = "Open Soundboard or Soundpad to add sounds".into();
+            }
+        }
+        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        if hovering && self.view == View::Board {
+            let name = self
+                .board
+                .banks
+                .get(self.bank)
+                .map(|b| b.name.clone())
+                .unwrap_or_default();
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("drop_hint"),
+            ));
+            let rect = ctx.screen_rect();
+            painter.rect_filled(rect, 0.0, Color32::from_black_alpha(170));
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                format!("Drop sounds or folders into \u{201C}{name}\u{201D}"),
+                FontId::proportional(24.0),
+                TEXT,
+            );
         }
     }
 
@@ -353,8 +468,9 @@ impl App {
         ui.add_space(10.0);
         ui.label(RichText::new("SECTIONS").small().color(MUTED));
         ui.add_space(4.0);
-        nav_button(ui, &mut self.view, View::Board, "Soundboard");
-        nav_button(ui, &mut self.view, View::Voice, "Voice & DSP");
+        nav_button(ui, &mut self.view, View::Board, self.app_mode.label());
+        let voice_label = if self.snap.voice_enabled { "Voice & DSP" } else { "Voice & DSP (off)" };
+        nav_button(ui, &mut self.view, View::Voice, voice_label);
         nav_button(ui, &mut self.view, View::KeyBinds, "Keybinds");
         nav_button(ui, &mut self.view, View::Settings, "Settings");
         let spare = (ui.available_height() - 28.0).max(0.0);
@@ -368,31 +484,29 @@ impl App {
     }
 
     pub(crate) fn pad_cells(&self) -> Vec<PadCell> {
-        self.board
-            .banks
-            .get(self.bank)
-            .map(|bank| {
-                bank.pads
-                    .iter()
-                    .map(|p| {
-                        let view = self.sampler.playback(self.bank, p.id);
-                        let duration = match view {
-                            Some(v) => format!("{} / {}", fmt_time(v.elapsed), fmt_time(v.length)),
-                            None if p.is_loaded() => format_duration(p.duration_ms),
-                            None => String::new(),
-                        };
-                        PadCell {
-                            title: if p.name.is_empty() { "empty".into() } else { p.name.clone() },
-                            key: p.hotkey.clone().unwrap_or_else(|| "-".into()),
-                            duration,
-                            loaded: p.is_loaded(),
-                            looping: p.play_mode.is_looping(),
-                            playing: view.is_some(),
-                            progress: view.map(|v| v.progress).unwrap_or(0.0),
-                        }
-                    })
-                    .collect()
+        let Some(bank) = self.board.banks.get(self.bank) else {
+            return Vec::new();
+        };
+        let views = self.sampler.playback_views(self.bank);
+        bank.pads
+            .iter()
+            .map(|p| {
+                let view = views.get(&p.id).copied();
+                let duration = match view {
+                    Some(v) => format!("{} / {}", fmt_time(v.elapsed), fmt_time(v.length)),
+                    None if p.is_loaded() => format_duration(p.duration_ms),
+                    None => String::new(),
+                };
+                PadCell {
+                    title: if p.name.is_empty() { "empty".into() } else { p.name.clone() },
+                    key: p.hotkey.clone().unwrap_or_else(|| "-".into()),
+                    duration,
+                    loaded: p.is_loaded(),
+                    looping: p.play_mode.is_looping(),
+                    playing: view.is_some(),
+                    progress: view.map_or(0.0, |v| v.progress),
+                }
             })
-            .unwrap_or_default()
+            .collect()
     }
 }

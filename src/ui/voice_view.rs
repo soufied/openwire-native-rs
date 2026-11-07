@@ -3,7 +3,9 @@ use eframe::egui;
 use crate::audio::dsp::DspSnapshot;
 use crate::presets::{ORDINARY_VOICE, VoicePreset};
 use super::app::App;
-use super::widgets::{card, chain_strip, slider};
+use super::widgets::{card, chain_strip, slider, switch};
+use super::theme::{ACCENT, WARN};
+use eframe::egui::RichText;
 
 pub(crate) fn pitch_controls(ui: &mut egui::Ui, s: &mut DspSnapshot) -> bool {
     let mut c = ui.checkbox(&mut s.pitch_enabled, "Enable pitch shift").changed();
@@ -65,6 +67,7 @@ impl App {
 
     pub(crate) fn apply_preset(&mut self) {
         let base = DspSnapshot {
+            voice_enabled: self.snap.voice_enabled,
             monitor_enabled: self.snap.monitor_enabled,
             monitor_volume: self.snap.monitor_volume,
             stream_volume: self.snap.stream_volume,
@@ -131,6 +134,23 @@ impl App {
     }
 
     pub(crate) fn voice_view(&mut self, ui: &mut egui::Ui) {
+        card(ui, "Voice & DSP", |ui| {
+            ui.horizontal(|ui| {
+                let mut on = self.snap.voice_enabled;
+                if switch(ui, &mut on) {
+                    self.snap.voice_enabled = on;
+                    self.params.apply(&self.snap);
+                    self.save_settings();
+                }
+                ui.add_space(8.0);
+                if on {
+                    ui.label(RichText::new("Processing on").color(ACCENT));
+                } else {
+                    ui.label(RichText::new("Bypassed: your microphone is sent unprocessed").color(WARN));
+                }
+            });
+        });
+        ui.add_space(8.0);
         card(ui, "Presets", |ui| {
             let names = self.preset_names();
             ui.horizontal_wrapped(|ui| {

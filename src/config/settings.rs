@@ -11,6 +11,30 @@ pub enum BoardLayout {
     List,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AppMode {
+    #[default]
+    Soundboard,
+    Soundpad,
+}
+
+impl AppMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            AppMode::Soundboard => "Soundboard",
+            AppMode::Soundpad => "Soundpad",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            AppMode::Soundboard => "Groups of pads you press. Grid or list view.",
+            AppMode::Soundpad => "Categories with a list of sounds. Drop files or folders in to add them.",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
     Play,
@@ -111,10 +135,16 @@ pub struct Settings {
     pub monitor_enabled: bool,
     #[serde(default = "yes")]
     pub close_to_tray: bool,
+    #[serde(default = "no")]
+    pub multi_play: bool,
+    #[serde(default = "yes")]
+    pub voice_enabled: bool,
     #[serde(default)]
     pub input_device: Option<String>,
     #[serde(default)]
     pub soundboard_layout: BoardLayout,
+    #[serde(default)]
+    pub app_mode: AppMode,
     #[serde(default)]
     pub transport_keys: TransportKeys,
 }
@@ -135,8 +165,11 @@ impl Default for Settings {
             ducking_enabled: true,
             monitor_enabled: false,
             close_to_tray: true,
+            multi_play: false,
+            voice_enabled: true,
             input_device: None,
             soundboard_layout: BoardLayout::Grid,
+            app_mode: AppMode::Soundboard,
             transport_keys: TransportKeys::default(),
         }
     }

@@ -118,21 +118,59 @@ pub(crate) fn format_duration(ms: u32) -> String {
     format!("{}:{:02}", ms / 60_000, (ms / 1000) % 60)
 }
 
+const INDEX_W: f32 = 40.0;
+const KEY_W: f32 = 84.0;
+const DURATION_W: f32 = 104.0;
+const GAP: f32 = 8.0;
+
+struct Columns {
+    index: Rect,
+    title: Rect,
+    duration: Rect,
+    key: Rect,
+}
+
+fn columns(rect: Rect) -> Columns {
+    let key = Rect::from_min_max(Pos2::new(rect.right() - KEY_W, rect.top()), rect.right_bottom());
+    let duration_right = key.left() - GAP;
+    let duration = Rect::from_min_max(
+        Pos2::new(duration_right - DURATION_W, rect.top()),
+        Pos2::new(duration_right, rect.bottom()),
+    );
+    let index = Rect::from_min_max(rect.left_top(), Pos2::new(rect.left() + INDEX_W, rect.bottom()));
+    let title = Rect::from_min_max(
+        Pos2::new(index.right(), rect.top()),
+        Pos2::new(duration.left() - GAP, rect.bottom()),
+    );
+    Columns { index, title, duration, key }
+}
+
+fn cell(painter: &egui::Painter, col: Rect, right_aligned: bool, text: &str, font: FontId, color: Color32) {
+    let (x, align) = if right_aligned {
+        (col.right(), Align2::RIGHT_CENTER)
+    } else {
+        (col.left() + 6.0, Align2::LEFT_CENTER)
+    };
+    painter
+        .with_clip_rect(col)
+        .text(Pos2::new(x, col.center().y), align, text, font, color);
+}
+
 pub(crate) fn table_header(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::hover());
     let painter = ui.painter_at(rect);
-    let y = rect.center().y;
+    let c = columns(rect);
     let font = FontId::proportional(12.5);
-    painter.text(Pos2::new(rect.left() + 10.0, y), Align2::LEFT_CENTER, "#", font.clone(), MUTED);
-    painter.text(Pos2::new(rect.left() + 48.0, y), Align2::LEFT_CENTER, "Name", font.clone(), MUTED);
-    painter.text(Pos2::new(rect.right() - 170.0, y), Align2::LEFT_CENTER, "Duration", font.clone(), MUTED);
-    painter.text(Pos2::new(rect.right() - 80.0, y), Align2::LEFT_CENTER, "Keybind", font, MUTED);
+    cell(&painter, c.index, false, "#", font.clone(), MUTED);
+    cell(&painter, c.title, false, "Name", font.clone(), MUTED);
+    cell(&painter, c.duration, true, "Duration", font.clone(), MUTED);
+    cell(&painter, c.key, false, "Keybind", font, MUTED);
 }
 
-pub(crate) fn pad_row(ui: &mut egui::Ui, slot: usize, cell: &PadCell, selected: bool) -> bool {
+pub(crate) fn pad_row(ui: &mut egui::Ui, slot: usize, cell_data: &PadCell, selected: bool) -> bool {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::click());
     let painter = ui.painter_at(rect);
-    let background = if cell.playing {
+    let background = if cell_data.playing {
         ACCENT_DIM
     } else if selected {
         Color32::from_rgb(44, 50, 60)
@@ -142,26 +180,26 @@ pub(crate) fn pad_row(ui: &mut egui::Ui, slot: usize, cell: &PadCell, selected: 
         Color32::TRANSPARENT
     };
     painter.rect_filled(rect, 3.0, background);
-    if cell.playing {
+    if cell_data.playing {
         let strip = Rect::from_min_size(
             Pos2::new(rect.left(), rect.bottom() - 3.0),
-            egui::vec2(rect.width() * cell.progress, 3.0),
+            egui::vec2(rect.width() * cell_data.progress, 3.0),
         );
         painter.rect_filled(strip, 0.0, ACCENT);
     }
-    let y = rect.center().y;
+    let c = columns(rect);
     let font = FontId::proportional(14.0);
-    let name_color = if !cell.loaded {
+    let name_color = if !cell_data.loaded {
         MUTED
-    } else if cell.playing {
+    } else if cell_data.playing {
         Color32::WHITE
     } else {
         TEXT
     };
-    painter.text(Pos2::new(rect.left() + 10.0, y), Align2::LEFT_CENTER, format!("{}", slot + 1), font.clone(), MUTED);
-    painter.text(Pos2::new(rect.left() + 48.0, y), Align2::LEFT_CENTER, cell.title.as_str(), font.clone(), name_color);
-    painter.text(Pos2::new(rect.right() - 170.0, y), Align2::LEFT_CENTER, cell.duration.as_str(), font.clone(), MUTED);
-    painter.text(Pos2::new(rect.right() - 80.0, y), Align2::LEFT_CENTER, cell.key.as_str(), font, ACCENT);
+    cell(&painter, c.index, false, &(slot + 1).to_string(), font.clone(), MUTED);
+    cell(&painter, c.title, false, cell_data.title.as_str(), font.clone(), name_color);
+    cell(&painter, c.duration, true, cell_data.duration.as_str(), font.clone(), MUTED);
+    cell(&painter, c.key, false, cell_data.key.as_str(), font, ACCENT);
     response.clicked()
 }
 
@@ -274,4 +312,69 @@ pub(crate) fn display_path(result: anyhow::Result<PathBuf>) -> String {
 
 pub(crate) fn slider(ui: &mut egui::Ui, value: &mut f32, range: RangeInclusive<f32>, label: &str) -> bool {
     ui.add(egui::Slider::new(value, range).text(label)).changed()
+}
+
+pub(crate) fn sound_header(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    let c = columns(rect);
+    let font = FontId::proportional(12.5);
+    cell(&painter, c.index, false, "#", font.clone(), MUTED);
+    cell(&painter, c.title, false, "Tag", font.clone(), MUTED);
+    cell(&painter, c.duration, true, "Duration", font.clone(), MUTED);
+    cell(&painter, c.key, false, "Hotkey", font, MUTED);
+}
+
+pub(crate) fn sound_row(ui: &mut egui::Ui, index: usize, cell_data: &PadCell, selected: bool, scroll_to: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::click());
+    if selected && scroll_to {
+        response.scroll_to_me(Some(egui::Align::Center));
+    }
+    let painter = ui.painter_at(rect);
+    let background = if cell_data.playing {
+        ACCENT_DIM
+    } else if selected {
+        Color32::from_rgb(44, 50, 60)
+    } else if response.hovered() {
+        Color32::from_rgb(34, 38, 46)
+    } else {
+        Color32::TRANSPARENT
+    };
+    painter.rect_filled(rect, 3.0, background);
+    if cell_data.playing {
+        let strip = Rect::from_min_size(
+            Pos2::new(rect.left(), rect.bottom() - 3.0),
+            egui::vec2(rect.width() * cell_data.progress, 3.0),
+        );
+        painter.rect_filled(strip, 0.0, ACCENT);
+    }
+    let c = columns(rect);
+    let font = FontId::proportional(14.0);
+    let ink = if cell_data.playing {
+        Color32::WHITE
+    } else if cell_data.loaded {
+        TEXT
+    } else {
+        MUTED
+    };
+    cell(&painter, c.index, false, &index.to_string(), font.clone(), MUTED);
+    cell(&painter, c.title, false, cell_data.title.as_str(), font.clone(), ink);
+    cell(&painter, c.duration, true, cell_data.duration.as_str(), font.clone(), MUTED);
+    cell(&painter, c.key, false, cell_data.key.as_str(), font, ACCENT);
+    response.on_hover_text(cell_data.title.as_str())
+}
+
+pub(crate) fn switch(ui: &mut egui::Ui, on: &mut bool) -> bool {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(44.0, 24.0), Sense::click());
+    let clicked = response.clicked();
+    if clicked {
+        *on = !*on;
+    }
+    let t = ui.ctx().animate_bool(response.id, *on);
+    let track = if *on { ACCENT_DIM } else { PAD_EMPTY };
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, rect.height() / 2.0, track);
+    let x = rect.left() + 12.0 + t * (rect.width() - 24.0);
+    painter.circle_filled(Pos2::new(x, rect.center().y), 9.0, TEXT);
+    clicked
 }

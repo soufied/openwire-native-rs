@@ -13,12 +13,64 @@ use crate::config::settings::Transport;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 pub fn pad_id(bank: usize, slot: usize) -> usize {
     bank.saturating_mul(1_000_000).saturating_add(slot)
+}
+
+pub const AUDIO_EXTENSIONS: &[&str] = &["mp3", "wav", "flac", "ogg", "oga", "m4a", "mp4", "aac", "aif", "aiff"];
+
+const MAX_SCAN_DEPTH: usize = 8;
+
+pub fn is_audio_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| AUDIO_EXTENSIONS.iter().any(|known| known.eq_ignore_ascii_case(ext)))
+}
+
+pub fn collect_audio(inputs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for input in inputs {
+        if input.is_dir() {
+            scan_dir(input, &mut out, 0);
+        } else if is_audio_file(input) {
+            out.push(input.clone());
+        }
+    }
+    out
+}
+
+fn scan_dir(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+    if depth > MAX_SCAN_DEPTH {
+        return;
+    }
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<PathBuf> = read.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    entries.sort();
+    for entry in entries {
+        if entry.is_dir() {
+            scan_dir(&entry, out, depth + 1);
+        } else if is_audio_file(&entry) {
+            out.push(entry);
+        }
+    }
+}
+
+pub fn sound_name(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "sound".into())
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ImportReport {
+    pub added: usize,
+    pub failed: Vec<String>,
 }
 
 fn poisoned<T>(_: T) -> anyhow::Error {
@@ -32,6 +84,7 @@ pub struct Sampler {
     board_path: RwLock<PathBuf>,
     playing: Mutex<HashMap<(usize, usize), Playback>>,
     master_monitor: AtomicU32,
+    multi_play: AtomicBool,
     current: Mutex<Option<(usize, usize)>>,
     last_played: Mutex<Option<(usize, usize)>>,
 }
@@ -46,6 +99,7 @@ impl Sampler {
             board_path: RwLock::new(board_path),
             playing: Mutex::new(HashMap::new()),
             master_monitor: AtomicU32::new(1.0_f32.to_bits()),
+            multi_play: AtomicBool::new(false),
             current: Mutex::new(None),
             last_played: Mutex::new(None),
         }
@@ -104,6 +158,99 @@ impl Sampler {
         self.persist()
     }
 
+    pub fn add_category(&self, name: String) -> Result<usize> {
+        let index = {
+            let mut board = self.board.write().map_err(poisoned)?;
+            let index = board.banks.len();
+            board.banks.push(Bank { name, pads: Vec::new() });
+            index
+        };
+        self.persist()?;
+        Ok(index)
+    }
+
+    pub fn import_many(&self, bank: usize, paths: Vec<PathBuf>, done: &AtomicUsize) -> Result<ImportReport> {
+        if self.board.read().map_err(poisoned)?.banks.get(bank).is_none() {
+            return Err(anyhow!("group {bank} does not exist"));
+        }
+        let mut report = ImportReport::default();
+        let mut batch = Vec::with_capacity(paths.len());
+        for path in paths {
+            match decode_file(&path, SAMPLE_RATE) {
+                Ok(samples) => {
+                    let duration_ms = (samples.len() as u64 * 1000 / SAMPLE_RATE as u64) as u32;
+                    let name = sound_name(&path);
+                    batch.push(Pad {
+                        name,
+                        path: Some(path),
+                        duration_ms,
+                        ..Pad::empty(bank, 0)
+                    });
+                }
+                Err(err) => report.failed.push(format!("{}: {err:#}", path.display())),
+            }
+            done.fetch_add(1, Ordering::Relaxed);
+        }
+        if batch.is_empty() {
+            return Ok(report);
+        }
+        report.added = batch.len();
+        {
+            let mut board = self.board.write().map_err(poisoned)?;
+            let group = board
+                .banks
+                .get_mut(bank)
+                .ok_or_else(|| anyhow!("group {bank} does not exist"))?;
+            group.pads.extend(batch);
+            board.renumber();
+        }
+        self.persist()?;
+        Ok(report)
+    }
+
+    pub fn remove_pad(&self, bank: usize, slot: usize) -> Result<()> {
+        {
+            let mut board = self.board.write().map_err(poisoned)?;
+            let group = board
+                .banks
+                .get_mut(bank)
+                .ok_or_else(|| anyhow!("group {bank} does not exist"))?;
+            if slot >= group.pads.len() {
+                return Err(anyhow!("pad {bank}/{slot} does not exist"));
+            }
+            group.pads.remove(slot);
+            board.renumber();
+        }
+        self.stop_bank(bank);
+        self.persist()
+    }
+
+    fn stop_bank(&self, bank: usize) {
+        let stopped: Vec<(usize, usize)> = match self.playing.lock() {
+            Ok(mut map) => {
+                let keys: Vec<(usize, usize)> = map.keys().filter(|(b, _)| *b == bank).copied().collect();
+                for key in &keys {
+                    map.remove(key);
+                }
+                keys
+            }
+            Err(_) => return,
+        };
+        for (b, s) in stopped {
+            self.control.stop_pad(pad_id(b, s));
+        }
+        if let Ok(mut current) = self.current.lock() {
+            if matches!(*current, Some((b, _)) if b == bank) {
+                *current = None;
+            }
+        }
+        if let Ok(mut last) = self.last_played.lock() {
+            if matches!(*last, Some((b, _)) if b == bank) {
+                *last = None;
+            }
+        }
+    }
+
     pub fn rename_bank(&self, bank: usize, name: String) -> Result<()> {
         {
             let mut board = self.board.write().map_err(poisoned)?;
@@ -158,11 +305,8 @@ impl Sampler {
     }
 
     pub fn import(&self, bank: usize, slot: usize, path: PathBuf) -> Result<Pad> {
-        let samples = self.load_samples(&path)?;
-        let name = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "sound".into());
+        let samples = decode_file(&path, SAMPLE_RATE)?;
+        let name = sound_name(&path);
         let duration_ms = (samples.len() as u64 * 1000 / SAMPLE_RATE as u64) as u32;
         let result = {
             let mut board = self.board.write().map_err(poisoned)?;
@@ -212,10 +356,49 @@ impl Sampler {
             .map(|p| p.view())
     }
 
+    pub fn set_multi_play(&self, enabled: bool) {
+        self.multi_play.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn multi_play(&self) -> bool {
+        self.multi_play.load(Ordering::Relaxed)
+    }
+
+    fn stop_others(&self, keep: (usize, usize)) {
+        let stopped: Vec<(usize, usize)> = match self.playing.lock() {
+            Ok(mut map) => {
+                let keys: Vec<(usize, usize)> = map.keys().filter(|k| **k != keep).copied().collect();
+                for key in &keys {
+                    map.remove(key);
+                }
+                keys
+            }
+            Err(_) => return,
+        };
+        for (b, s) in stopped {
+            self.control.stop_pad(pad_id(b, s));
+        }
+    }
+
+    pub fn playback_views(&self, bank: usize) -> HashMap<usize, PlaybackView> {
+        self.playing
+            .lock()
+            .map(|map| {
+                map.iter()
+                    .filter(|(key, p)| key.0 == bank && !p.finished())
+                    .map(|(key, p)| (key.1, p.view()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn play(&self, bank: usize, slot: usize) -> Result<()> {
         let pad = self.pad_at(bank, slot)?;
         if !pad.is_loaded() {
             return Ok(());
+        }
+        if !self.multi_play() {
+            self.stop_others((bank, slot));
         }
         let samples = self.pad_samples(&pad)?;
         let start = (pad.trim_start_ms as usize * SAMPLE_RATE as usize / 1000).min(samples.len());
@@ -408,5 +591,23 @@ fn bass_boost(samples: &[f32]) -> Vec<f32> {
 pub(crate) fn report(result: Result<()>) {
     if let Err(err) = result {
         eprintln!("[openwire][sampler] {err:#}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognises_audio_extensions_case_insensitively() {
+        assert!(is_audio_file(Path::new("horn.MP3")));
+        assert!(is_audio_file(Path::new("/x/y/clip.flac")));
+        assert!(!is_audio_file(Path::new("notes.txt")));
+        assert!(!is_audio_file(Path::new("no_extension")));
+    }
+
+    #[test]
+    fn sound_name_drops_extension_and_folders() {
+        assert_eq!(sound_name(Path::new("/music/Bingo Bango.wav")), "Bingo Bango");
     }
 }

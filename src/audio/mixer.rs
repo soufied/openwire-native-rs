@@ -169,14 +169,12 @@ impl MixerBus {
         let master = self.master_monitor;
         let mut audible = false;
         for voice in self.voices.iter_mut() {
-            if voice.paused {
+            if voice.paused || voice.samples.is_empty() {
                 continue;
             }
             let len = voice.samples.len();
-            if len == 0 {
-                continue;
-            }
             let monitor_gain = voice.monitor_gain * master;
+            let stream_gain = voice.stream_gain;
             let mut i = 0;
             while i < frames {
                 if voice.pos >= len {
@@ -188,10 +186,14 @@ impl MixerBus {
                 }
                 let n = (len - voice.pos).min(frames - i);
                 audible = true;
-                for j in 0..n {
-                    let s = voice.samples[voice.pos + j];
-                    monitor[i + j] += s * monitor_gain;
-                    stream[i + j] += s * voice.stream_gain;
+                let src = &voice.samples[voice.pos..voice.pos + n];
+                for ((m, s_out), &s) in monitor[i..i + n]
+                    .iter_mut()
+                    .zip(stream[i..i + n].iter_mut())
+                    .zip(src)
+                {
+                    *m += s * monitor_gain;
+                    *s_out += s * stream_gain;
                 }
                 voice.pos += n;
                 i += n;

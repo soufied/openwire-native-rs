@@ -31,6 +31,7 @@ pub struct Params {
     pub stream_volume: AtomicU32,
     pub noise_gate_enabled: AtomicBool,
     pub noise_gate_db: AtomicU32,
+    pub voice_enabled: AtomicBool,
 }
 
 fn load(a: &AtomicU32) -> f32 {
@@ -70,6 +71,7 @@ impl Params {
         store(&self.stream_volume, s.stream_volume);
         self.noise_gate_enabled.store(s.noise_gate_enabled, Ordering::Relaxed);
         store(&self.noise_gate_db, s.noise_gate_db);
+        self.voice_enabled.store(s.voice_enabled, Ordering::Relaxed);
     }
 
     pub fn snapshot(&self) -> DspSnapshot {
@@ -95,6 +97,7 @@ impl Params {
             stream_volume: load(&self.stream_volume).clamp(0.0, 2.0),
             noise_gate_enabled: self.noise_gate_enabled.load(Ordering::Relaxed),
             noise_gate_db: load(&self.noise_gate_db).clamp(-90.0, -20.0),
+            voice_enabled: self.voice_enabled.load(Ordering::Relaxed),
         }
     }
 }
@@ -122,6 +125,7 @@ pub struct DspSnapshot {
     pub stream_volume: f32,
     pub noise_gate_enabled: bool,
     pub noise_gate_db: f32,
+    pub voice_enabled: bool,
 }
 
 impl Default for DspSnapshot {
@@ -148,6 +152,7 @@ impl Default for DspSnapshot {
             stream_volume: 1.0,
             noise_gate_enabled: true,
             noise_gate_db: -52.0,
+            voice_enabled: true,
         }
     }
 }
@@ -631,6 +636,9 @@ impl DspChain {
             self.last = snap;
         }
 
+        if !snap.voice_enabled {
+            return;
+        }
         let pitch_on = snap.pitch_enabled;
         let formant_on = (snap.formant_shift - 1.0).abs() > 0.001;
         let gate = 10f32.powf(snap.noise_gate_db / 20.0).max(1e-6);

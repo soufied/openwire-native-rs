@@ -2,21 +2,21 @@ use crate::input::keybinds as hotkeys;
 use std::sync::mpsc;
 use eframe::egui;
 use eframe::egui::{Color32, RichText};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use crate::board::PlayMode;
-use crate::config::settings::BoardLayout;
+use crate::config::settings::{AppMode, BoardLayout};
 use crate::input::keybinds::Target;
-use crate::playback::Action;
-use super::app::{App, GroupAction};
+use crate::playback::{collect_audio, Action, AUDIO_EXTENSIONS};
+use super::app::{App, GroupAction, ImportJob};
 use super::theme::{ACCENT, DANGER, MUTED, TEXT, WARN};
 use super::widgets::{card, dot_label, group_menu, pad_row, pad_tile, table_header, waveform_ui};
 
 impl App {
     pub(crate) fn import_pad(&mut self) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter(
-                "Audio",
-                &["mp3", "wav", "flac", "ogg", "oga", "m4a", "mp4", "aac", "aif", "aiff"],
-            )
+            .add_filter("Audio", AUDIO_EXTENSIONS)
             .pick_file()
         else {
             return;
@@ -33,6 +33,49 @@ impl App {
             self.status = "Importing…".into();
         } else {
             self.status = "Worker unavailable".into();
+        }
+    }
+
+    pub(crate) fn import_paths(&mut self, bank: usize, paths: Vec<PathBuf>) {
+        if self.import_job.is_some() {
+            self.status = "An import is already running. Wait for it to finish.".into();
+            return;
+        }
+        let label = match paths.as_slice() {
+            [dir] if dir.is_dir() => format!(
+                "\u{201C}{}\u{201D}",
+                dir.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "folder".into())
+            ),
+            _ => "selected files".to_string(),
+        };
+        let total = Arc::new(AtomicUsize::new(0));
+        let done = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = mpsc::channel();
+        let sampler = self.sampler.clone();
+        let (total_bg, done_bg) = (total.clone(), done.clone());
+        let spawned = std::thread::Builder::new()
+            .name("openwire-import".into())
+            .spawn(move || {
+                let files = collect_audio(&paths);
+                total_bg.store(files.len(), Ordering::Relaxed);
+                let result = sampler
+                    .import_many(bank, files, &done_bg)
+                    .map_err(|e| format!("{e:#}"));
+                let _ = tx.send(result);
+            });
+        match spawned {
+            Ok(_) => {
+                self.status = format!("Importing {label}…");
+                self.import_job = Some(ImportJob {
+                    label,
+                    total,
+                    done,
+                    rx,
+                });
+            }
+            Err(err) => self.status = format!("Cannot start import: {err}"),
         }
     }
 
@@ -282,13 +325,29 @@ impl App {
         let mut cancel_capture = false;
         let view = self.sampler.playback(self.bank, self.selected);
 
-        let title = if pad.name.is_empty() { "Empty pad".to_string() } else { pad.name.clone() };
+        let soundpad = self.app_mode == AppMode::Soundpad;
+        let title = if pad.name.is_empty() {
+            if soundpad { "Empty sound".to_string() } else { "Empty pad".to_string() }
+        } else {
+            pad.name.clone()
+        };
         ui.label(RichText::new(title).size(18.0).strong().color(TEXT));
+        let place = if soundpad { "Category" } else { "Group" };
+        let slot_word = if soundpad { "sound" } else { "pad" };
         ui.label(
-            RichText::new(format!("Group {} · pad {}", self.bank + 1, self.selected + 1))
+            RichText::new(format!("{place} {} · {slot_word} {}", self.bank + 1, self.selected + 1))
                 .small()
                 .color(MUTED),
         );
+        ui.add_space(6.0);
+
+        card(ui, "Name", |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut pad.name)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Sound name"),
+            );
+        });
         ui.add_space(6.0);
 
         let mut seek_to = None;

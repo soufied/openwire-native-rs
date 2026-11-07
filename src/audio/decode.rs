@@ -30,6 +30,7 @@ pub fn decode_file(path: &Path, target_rate: u32) -> Result<Vec<f32>> {
         .make(&track.codec_params, &DecoderOptions::default())
         .context("no decoder available for track")?;
     let mut mono = Vec::new();
+    let mut scratch: Option<Scratch> = None;
     loop {
         let packet = match format.next_packet() {
             Ok(p) => p,
@@ -39,7 +40,7 @@ pub fn decode_file(path: &Path, target_rate: u32) -> Result<Vec<f32>> {
             continue;
         }
         match decoder.decode(&packet) {
-            Ok(buf) => append_mono(&buf, &mut mono),
+            Ok(buf) => append_mono(buf, &mut mono, &mut scratch),
             Err(SymError::DecodeError(_)) => continue,
             Err(_) => break,
         }
@@ -50,13 +51,35 @@ pub fn decode_file(path: &Path, target_rate: u32) -> Result<Vec<f32>> {
     Ok(resample(&mono, src_rate, target_rate))
 }
 
-fn append_mono(buf: &AudioBufferRef, out: &mut Vec<f32>) {
+struct Scratch {
+    capacity: u64,
+    rate: u32,
+    channels: usize,
+    buffer: SampleBuffer<f32>,
+}
+
+fn append_mono(buf: AudioBufferRef, out: &mut Vec<f32>, scratch: &mut Option<Scratch>) {
     let spec = *buf.spec();
+    let capacity = buf.capacity() as u64;
     let channels = spec.channels.count().max(1);
-    let mut interleaved = SampleBuffer::<f32>::new(buf.capacity() as u64, spec);
-    interleaved.copy_interleaved_ref(buf.clone());
+    let reusable = matches!(
+        scratch,
+        Some(s) if s.capacity == capacity && s.rate == spec.rate && s.channels == channels
+    );
+    if !reusable {
+        *scratch = Some(Scratch {
+            capacity,
+            rate: spec.rate,
+            channels,
+            buffer: SampleBuffer::<f32>::new(capacity, spec),
+        });
+    }
+    let Some(s) = scratch.as_mut() else {
+        return;
+    };
+    s.buffer.copy_interleaved_ref(buf);
     out.extend(
-        interleaved
+        s.buffer
             .samples()
             .chunks(channels)
             .map(|frame| frame.iter().sum::<f32>() / channels as f32),

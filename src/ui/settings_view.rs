@@ -2,7 +2,7 @@ use crate::config::paths;
 use eframe::egui;
 use eframe::egui::{RichText};
 use crate::audio::engine::EngineCmd;
-use crate::config::settings::Settings;
+use crate::config::settings::{AppMode, Settings};
 use crate::playback::Sampler;
 use crate::presets::PresetStore;
 use std::path::PathBuf;
@@ -62,6 +62,23 @@ impl App {
     }
 
     pub(crate) fn settings_view(&mut self, ui: &mut egui::Ui) {
+        card(ui, "Interface mode", |ui| {
+            let mut mode = self.app_mode;
+            for option in [AppMode::Soundboard, AppMode::Soundpad] {
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut mode, option, option.label());
+                    ui.label(RichText::new(option.description()).small().color(MUTED));
+                });
+            }
+            if mode != self.app_mode {
+                self.app_mode = mode;
+                self.settings.app_mode = mode;
+                self.save_settings();
+                self.status = format!("Interface mode: {}", mode.label());
+            }
+        });
+
+        ui.add_space(8.0);
         card(ui, "Audio input", |ui| {
             let devices = self.inputs.lock().map(|l| l.clone()).unwrap_or_default();
             let current = self.settings.input_device.clone();
@@ -132,6 +149,15 @@ impl App {
             changed |= ui.checkbox(&mut self.snap.monitor_enabled, "Hear myself").changed();
             changed |= ui.checkbox(&mut self.snap.ducking_enabled, "Duck mic while pads play").changed();
             changed |= ui.checkbox(&mut self.settings.close_to_tray, "Closing the window (X) hides it to the tray").changed();
+            if ui.checkbox(&mut self.settings.multi_play, "Multi-play: allow several sounds at once").changed() {
+                self.sampler.set_multi_play(self.settings.multi_play);
+                changed = true;
+            }
+            ui.label(
+                RichText::new("Off: starting a sound stops the one that is playing.")
+                    .small()
+                    .color(MUTED),
+            );
             if changed {
                 self.params.apply(&self.snap);
                 self.save_settings();

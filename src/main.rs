@@ -19,11 +19,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let settings = settings::Settings::load();
     let data = paths::data_dir(&settings)?;
     paths::ensure(&data)?;
+    if settings.data_dir.is_none() {
+        paths::migrate_legacy_data(&data);
+    }
     let presets_dir = paths::presets_dir(&settings)?;
 
     let mut initial = audio::dsp::DspSnapshot::default();
     initial.monitor_enabled = settings.monitor_enabled;
     initial.ducking_enabled = settings.ducking_enabled;
+    initial.voice_enabled = settings.voice_enabled;
     let params = audio::dsp::Params::with_snapshot(&initial);
 
     let (control, bus, mut reaper) = audio::mixer::MixerBus::split();
@@ -51,6 +55,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         data.join("soundboard.toml"),
         control.clone(),
     ));
+    sampler.set_multi_play(settings.multi_play);
     let (actions, rx) = mpsc::channel();
     playback::run_worker(sampler.clone(), rx);
 
