@@ -1,6 +1,6 @@
 
 pkgname=openwire
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="Native soundboard and real-time voice effects processor for Linux (PipeWire)"
 arch=('x86_64')
