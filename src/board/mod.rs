@@ -53,10 +53,23 @@ pub struct Pad {
     pub bass_boost: bool,
     #[serde(default)]
     pub play_mode: PlayMode,
+    #[serde(default)]
+    pub favorite: bool,
+    #[serde(default)]
+    pub play_count: u64,
+    #[serde(default)]
+    pub added_at: u64,
 }
 
 fn full() -> f32 {
     1.0
+}
+
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
 }
 
 impl Pad {
@@ -74,6 +87,9 @@ impl Pad {
             duration_ms: 0,
             bass_boost: false,
             play_mode: PlayMode::OneShot,
+            favorite: false,
+            play_count: 0,
+            added_at: 0,
         }
     }
 
@@ -85,6 +101,8 @@ impl Pad {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bank {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<PathBuf>,
     pub pads: Vec<Pad>,
 }
 
@@ -101,6 +119,7 @@ impl Default for Soundboard {
                 .enumerate()
                 .map(|(bank, name)| Bank {
                     name: name.to_string(),
+                    folder: None,
                     pads: (0..PADS_PER_GROUP).map(|slot| Pad::empty(bank, slot)).collect(),
                 })
                 .collect(),

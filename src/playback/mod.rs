@@ -5,7 +5,7 @@ pub use timing::PlaybackView;
 pub use worker::{run_worker, Action};
 use timing::Playback;
 
-use crate::board::{Bank, Pad, Soundboard, PADS_PER_GROUP};
+use crate::board::{now_secs, Bank, Pad, Soundboard, PADS_PER_GROUP};
 use crate::audio::decode::decode_file;
 use crate::audio::dsp::{Biquad, SAMPLE_RATE};
 use crate::audio::mixer::{MixerControl, PlayRequest};
@@ -13,7 +13,7 @@ use crate::config::settings::Transport;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -87,6 +87,7 @@ pub struct Sampler {
     multi_play: AtomicBool,
     current: Mutex<Option<(usize, usize)>>,
     last_played: Mutex<Option<(usize, usize)>>,
+    revision: AtomicU64,
 }
 
 impl Sampler {
@@ -102,6 +103,7 @@ impl Sampler {
             multi_play: AtomicBool::new(false),
             current: Mutex::new(None),
             last_played: Mutex::new(None),
+            revision: AtomicU64::new(0),
         }
     }
 
@@ -128,6 +130,7 @@ impl Sampler {
             let index = board.banks.len();
             board.banks.push(Bank {
                 name,
+                folder: None,
                 pads: (0..PADS_PER_GROUP).map(|slot| Pad::empty(index, slot)).collect(),
             });
             index
@@ -162,11 +165,27 @@ impl Sampler {
         let index = {
             let mut board = self.board.write().map_err(poisoned)?;
             let index = board.banks.len();
-            board.banks.push(Bank { name, pads: Vec::new() });
+            board.banks.push(Bank {
+                name,
+                folder: None,
+                pads: Vec::new(),
+            });
             index
         };
         self.persist()?;
         Ok(index)
+    }
+
+    pub fn set_group_folder(&self, bank: usize, folder: Option<PathBuf>) -> Result<()> {
+        {
+            let mut board = self.board.write().map_err(poisoned)?;
+            let group = board
+                .banks
+                .get_mut(bank)
+                .ok_or_else(|| anyhow!("group {bank} does not exist"))?;
+            group.folder = folder;
+        }
+        self.persist()
     }
 
     pub fn import_many(&self, bank: usize, paths: Vec<PathBuf>, done: &AtomicUsize) -> Result<ImportReport> {
@@ -184,6 +203,7 @@ impl Sampler {
                         name,
                         path: Some(path),
                         duration_ms,
+                        added_at: now_secs(),
                         ..Pad::empty(bank, 0)
                     });
                 }
@@ -316,6 +336,7 @@ impl Sampler {
             pad.name = name;
             pad.path = Some(path);
             pad.duration_ms = duration_ms;
+            pad.added_at = now_secs();
             pad.trim_start_ms = 0;
             pad.trim_end_ms = 0;
             pad.clone()
@@ -393,6 +414,10 @@ impl Sampler {
     }
 
     pub fn play(&self, bank: usize, slot: usize) -> Result<()> {
+        self.start(bank, slot, true)
+    }
+
+    fn start(&self, bank: usize, slot: usize, counted: bool) -> Result<()> {
         let pad = self.pad_at(bank, slot)?;
         if !pad.is_loaded() {
             return Ok(());
@@ -429,7 +454,37 @@ impl Sampler {
             stream_gain: pad.stream_volume.clamp(0.0, 2.0),
             looping,
         });
+        if counted {
+            self.count_play(bank, slot);
+        }
         Ok(())
+    }
+
+    fn count_play(&self, bank: usize, slot: usize) {
+        let changed = match self.board.write() {
+            Ok(mut board) => match board.pad_mut(bank, slot) {
+                Some(pad) => {
+                    pad.play_count = pad.play_count.saturating_add(1);
+                    true
+                }
+                None => false,
+            },
+            Err(_) => false,
+        };
+        if changed {
+            report(self.persist());
+        }
+    }
+
+    pub fn set_pad_favorite(&self, bank: usize, slot: usize, favorite: bool) -> Result<()> {
+        {
+            let mut board = self.board.write().map_err(poisoned)?;
+            let pad = board
+                .pad_mut(bank, slot)
+                .ok_or_else(|| anyhow!("pad {bank}/{slot} does not exist"))?;
+            pad.favorite = favorite;
+        }
+        self.persist()
     }
 
     pub fn stop_pad(&self, bank: usize, slot: usize) {
@@ -466,7 +521,7 @@ impl Sampler {
 
     pub fn seek(&self, bank: usize, slot: usize, progress: f32) {
         let previous_paused = self.playback(bank, slot).map(|v| v.paused);
-        if self.play(bank, slot).is_err() {
+        if self.start(bank, slot, false).is_err() {
             return;
         }
         let paused = previous_paused == Some(true);
@@ -576,7 +631,12 @@ impl Sampler {
         Ok(decoded)
     }
 
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Relaxed)
+    }
+
     fn persist(&self) -> Result<()> {
+        self.revision.fetch_add(1, Ordering::Relaxed);
         let path = self.board_path.read().map_err(poisoned)?.clone();
         let board = self.board.read().map_err(poisoned)?;
         board.save(&path)

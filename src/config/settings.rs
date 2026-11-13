@@ -35,6 +35,29 @@ impl AppMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SoundSort {
+    #[default]
+    Manual,
+    MostPlayed,
+    DateAdded,
+    Name,
+}
+
+impl SoundSort {
+    pub const ALL: [SoundSort; 4] = [SoundSort::Manual, SoundSort::MostPlayed, SoundSort::DateAdded, SoundSort::Name];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SoundSort::Manual => "Manual order",
+            SoundSort::MostPlayed => "Most played",
+            SoundSort::DateAdded => "Date added",
+            SoundSort::Name => "Name",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
     Play,
@@ -147,6 +170,14 @@ pub struct Settings {
     pub app_mode: AppMode,
     #[serde(default)]
     pub transport_keys: TransportKeys,
+    #[serde(default = "full_volume")]
+    pub master_monitor: f32,
+    #[serde(default)]
+    pub sound_sort: SoundSort,
+}
+
+fn full_volume() -> f32 {
+    1.0
 }
 
 fn yes() -> bool {
@@ -171,6 +202,8 @@ impl Default for Settings {
             soundboard_layout: BoardLayout::Grid,
             app_mode: AppMode::Soundboard,
             transport_keys: TransportKeys::default(),
+            master_monitor: 1.0,
+            sound_sort: SoundSort::Manual,
         }
     }
 }

@@ -10,8 +10,8 @@ use crate::config::settings::{AppMode, BoardLayout};
 use crate::input::keybinds::Target;
 use crate::playback::{collect_audio, Action, AUDIO_EXTENSIONS};
 use super::app::{App, GroupAction, ImportJob};
-use super::theme::{ACCENT, DANGER, MUTED, TEXT, WARN};
-use super::widgets::{card, dot_label, group_menu, pad_row, pad_tile, table_header, waveform_ui};
+use super::theme::{ACCENT, ACCENT_SOFT, CARD_HI, DANGER, MUTED, TEXT, WARN};
+use super::widgets::{card, dot_label, group_menu, pad_row, pad_tile, pill, table_header, waveform_ui};
 
 impl App {
     pub(crate) fn import_pad(&mut self) {
@@ -153,13 +153,11 @@ impl App {
                 ui.add_space(8.0);
                 let selected = self.selected;
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    egui::Grid::new("pads").spacing([10.0, 10.0]).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
                         for (slot, cell) in cells.iter().enumerate() {
                             if pad_tile(ui, cell, selected == slot).clicked() {
                                 pick = Some(slot);
-                            }
-                            if (slot + 1) % 5 == 0 {
-                                ui.end_row();
                             }
                         }
                     });
@@ -309,8 +307,9 @@ impl App {
 
     pub(crate) fn properties(&mut self, ui: &mut egui::Ui) {
         let Some(mut pad) = self.edit.clone() else {
-            card(ui, "No pad selected", |ui| {
-                ui.label(RichText::new("Click a pad to edit it.").color(MUTED));
+            card(ui, "", |ui| {
+                ui.label(RichText::new("No sound selected").strong().color(TEXT));
+                ui.label(RichText::new("Click a pad or a sound to edit it.").small().color(MUTED));
             });
             return;
         };
@@ -331,104 +330,131 @@ impl App {
         } else {
             pad.name.clone()
         };
-        ui.label(RichText::new(title).size(18.0).strong().color(TEXT));
         let place = if soundpad { "Category" } else { "Group" };
-        let slot_word = if soundpad { "sound" } else { "pad" };
-        ui.label(
-            RichText::new(format!("{place} {} · {slot_word} {}", self.bank + 1, self.selected + 1))
-                .small()
-                .color(MUTED),
-        );
-        ui.add_space(6.0);
-
-        card(ui, "Name", |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut pad.name)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("Sound name"),
-            );
+        let slot_word = if soundpad { "Sound" } else { "Pad" };
+        ui.add(egui::Label::new(RichText::new(title).size(17.0).strong().color(TEXT)).truncate());
+        ui.horizontal(|ui| {
+            pill(ui, &format!("{place} {}", self.bank + 1), MUTED, CARD_HI);
+            pill(ui, &format!("{slot_word} {}", self.selected + 1), MUTED, CARD_HI);
+            if pad.favorite {
+                pill(ui, "Favorite", ACCENT, ACCENT_SOFT);
+            }
         });
-        ui.add_space(6.0);
+        ui.add_space(10.0);
 
         let mut seek_to = None;
-        card(ui, "Waveform", |ui| {
+        card(ui, "", |ui| {
             seek_to = waveform_ui(ui, &self.waveform, view, pad.duration_ms);
         });
         if let Some(progress) = seek_to {
             let _ = self.actions.send(Action::Seek(self.bank, self.selected, progress));
         }
 
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            let loaded = pad.is_loaded();
+            let play_btn = egui::Button::new(RichText::new("Play").strong().color(Color32::BLACK))
+                .fill(ACCENT)
+                .min_size(egui::vec2(104.0, 32.0));
+            play = ui.add_enabled(loaded, play_btn).clicked();
+            let pause_label = if view.is_some_and(|v| v.paused) { "Resume" } else { "Pause" };
+            pause = ui
+                .add_enabled(view.is_some(), egui::Button::new(pause_label).min_size(egui::vec2(84.0, 32.0)))
+                .clicked();
+            stop = ui.add(egui::Button::new("Stop").min_size(egui::vec2(72.0, 32.0))).clicked();
+        });
         ui.add_space(6.0);
-        card(ui, "Transport", |ui| {
-            ui.horizontal(|ui| {
-                let play_btn = egui::Button::new(RichText::new("Play").strong().color(Color32::BLACK)).fill(ACCENT);
-                play = ui.add_enabled(pad.is_loaded(), play_btn).clicked();
-                let pause_label = if view.is_some_and(|v| v.paused) { "Resume" } else { "Pause" };
-                pause = ui.add_enabled(view.is_some(), egui::Button::new(pause_label)).clicked();
-                stop = ui.button("Stop").clicked();
-                import = ui.button("Import file").clicked();
-                clear = ui.button("Clear").clicked();
-            });
+        ui.horizontal(|ui| {
+            import = ui.button("Import file").clicked();
+            clear = ui.button("Clear pad").clicked();
         });
 
-        ui.add_space(6.0);
-        card(ui, "Playback", |ui| {
-            egui::ComboBox::from_label("Mode")
-                .selected_text(pad.play_mode.label())
-                .show_ui(ui, |ui| {
-                    for mode in [PlayMode::OneShot, PlayMode::Loop, PlayMode::Toggle] {
-                        ui.selectable_value(&mut pad.play_mode, mode, mode.label());
-                    }
-                });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Keybind").color(MUTED));
-                ui.label(
-                    RichText::new(pad.hotkey.clone().unwrap_or_else(|| "none".into()))
-                        .monospace()
-                        .color(ACCENT),
+        ui.add_space(10.0);
+        card(ui, "Sound", |ui| {
+            prop_row(ui, "Name", |ui| {
+                let width = ui.available_width();
+                ui.add_sized(
+                    [width, 24.0],
+                    egui::TextEdit::singleline(&mut pad.name).hint_text("Sound name"),
                 );
             });
-            ui.horizontal(|ui| {
+            prop_row(ui, "Mode", |ui| {
+                let width = ui.available_width();
+                egui::ComboBox::from_id_salt("pad_mode")
+                    .width(width)
+                    .selected_text(pad.play_mode.label())
+                    .show_ui(ui, |ui| {
+                        for mode in [PlayMode::OneShot, PlayMode::Loop, PlayMode::Toggle] {
+                            ui.selectable_value(&mut pad.play_mode, mode, mode.label());
+                        }
+                    });
+            });
+            prop_row(ui, "Keybind", |ui| {
                 if self.capturing(Target::Pad(self.bank, self.selected)) {
-                    ui.label(RichText::new("Press a key... (ESC clears)").color(WARN));
+                    ui.label(RichText::new("Press a key, ESC clears").color(WARN));
                     if ui.button("Cancel").clicked() {
                         cancel_capture = true;
                     }
                 } else {
-                    if ui.button("Assign keybind").clicked() {
+                    pill(
+                        ui,
+                        pad.hotkey.as_deref().unwrap_or("none"),
+                        if pad.hotkey.is_some() { ACCENT } else { MUTED },
+                        if pad.hotkey.is_some() { ACCENT_SOFT } else { CARD_HI },
+                    );
+                    if ui.button("Assign").clicked() {
                         assign_key = true;
                     }
-                    if ui.button("Clear").clicked() {
+                    if ui.add_enabled(pad.hotkey.is_some(), egui::Button::new("Clear")).clicked() {
                         clear_key = true;
                     }
                 }
             });
-            ui.checkbox(&mut pad.bass_boost, "Bass boost");
+            prop_row(ui, "Bass boost", |ui| {
+                ui.checkbox(&mut pad.bass_boost, "Boost low end");
+            });
         });
 
-        ui.add_space(6.0);
+        ui.add_space(10.0);
         card(ui, "Levels", |ui| {
-            ui.add(egui::Slider::new(&mut pad.monitor_volume, 0.0..=1.0).text("Monitor"));
-            ui.add(egui::Slider::new(&mut pad.stream_volume, 0.0..=2.0).text("Virtual mic"));
+            prop_row(ui, "Monitor", |ui| {
+                let width = ui.available_width();
+                ui.add_sized([width, 20.0], egui::Slider::new(&mut pad.monitor_volume, 0.0..=1.0));
+            });
+            prop_row(ui, "Virtual mic", |ui| {
+                let width = ui.available_width();
+                ui.add_sized([width, 20.0], egui::Slider::new(&mut pad.stream_volume, 0.0..=2.0));
+            });
         });
 
-        ui.add_space(6.0);
+        ui.add_space(10.0);
         card(ui, "Trim", |ui| {
             let max_ms = pad.duration_ms.max(1);
-            ui.add(egui::Slider::new(&mut pad.trim_start_ms, 0..=max_ms).text("Start, ms"));
-            ui.add(egui::Slider::new(&mut pad.trim_end_ms, 0..=max_ms).text("End, ms (0 = to end)"));
+            prop_row(ui, "Start", |ui| {
+                let width = ui.available_width();
+                ui.add_sized([width, 20.0], egui::Slider::new(&mut pad.trim_start_ms, 0..=max_ms).suffix(" ms"));
+            });
+            prop_row(ui, "End", |ui| {
+                let width = ui.available_width();
+                ui.add_sized(
+                    [width, 20.0],
+                    egui::Slider::new(&mut pad.trim_end_ms, 0..=max_ms).suffix(" ms (0 = end)"),
+                );
+            });
         });
 
         let unsaved = self
             .board
             .pad(self.bank, self.selected)
             .is_some_and(|saved| format!("{saved:?}") != format!("{pad:?}"));
-        ui.add_space(8.0);
+        ui.add_space(12.0);
         ui.horizontal(|ui| {
-            let save_btn = egui::Button::new(RichText::new("Save pad").strong().color(Color32::BLACK)).fill(ACCENT);
+            let save_btn = egui::Button::new(RichText::new("Save changes").strong().color(Color32::BLACK))
+                .fill(ACCENT)
+                .min_size(egui::vec2(132.0, 30.0));
             save = ui.add(save_btn).clicked();
             if unsaved {
-                dot_label(ui, WARN, "unsaved changes");
+                dot_label(ui, WARN, "unsaved");
             }
         });
 
@@ -461,4 +487,12 @@ impl App {
             let _ = self.actions.send(Action::Stop(self.bank, self.selected));
         }
     }
+}
+
+fn prop_row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.add_sized([84.0, 24.0], egui::Label::new(RichText::new(label).color(MUTED)));
+        add(ui);
+    });
+    ui.add_space(4.0);
 }

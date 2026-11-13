@@ -1,6 +1,6 @@
 [package]
 name = "openwire"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.77"
 license = "GPL-3.0-or-later"
@@ -19,6 +19,7 @@ rustfft = "6"
 serde = { version = "1", features = ["derive"] }
 symphonia = { version = "0.5", features = ["all"] }
 toml = "0.8"
+ureq = "2"
 
 [profile.release]
 lto = "thin"

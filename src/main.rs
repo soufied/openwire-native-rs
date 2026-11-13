@@ -2,6 +2,7 @@ mod audio;
 mod board;
 mod config;
 mod input;
+mod links;
 mod playback;
 mod presets;
 mod system;
@@ -15,6 +16,17 @@ use ui::Wiring;
 
 fn main() -> Result<(), Box<dyn Error>> {
     system::window::configure_backend();
+
+    let launch: Vec<system::instance::Message> = std::env::args()
+        .skip(1)
+        .filter(|arg| links::is_soundpad_link(arg))
+        .map(system::instance::Message::Open)
+        .collect();
+    let (ipc_tx, ipc_rx) = mpsc::channel();
+    let wake = system::tray::new_wake();
+    if !system::instance::claim_or_forward(launch, ipc_tx, wake.clone()) {
+        return Ok(());
+    }
 
     let settings = settings::Settings::load();
     let data = paths::data_dir(&settings)?;
@@ -56,6 +68,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         control.clone(),
     ));
     sampler.set_multi_play(settings.multi_play);
+    sampler.set_master_monitor(settings.master_monitor);
     let (actions, rx) = mpsc::channel();
     playback::run_worker(sampler.clone(), rx);
 
@@ -65,7 +78,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     input::keybinds::watch(bindings.clone(), capture.clone(), actions.clone());
 
     let (tray_tx, tray_rx) = mpsc::channel();
-    let wake = system::tray::new_wake();
     system::tray::spawn(tray_tx, wake.clone());
 
     let presets = presets::PresetStore::new(&presets_dir)?;
@@ -88,6 +100,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         settings,
         presets,
         tray_rx,
+        ipc_rx,
         engine_commands,
         inputs,
         engine_running,

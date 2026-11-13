@@ -1,4 +1,6 @@
 
+use crate::board::Pad;
+use crate::config::settings::SoundSort;
 use crate::input::keybinds as hotkeys;
 use crate::playback::{Action, AUDIO_EXTENSIONS};
 use eframe::egui::{self, Align2, RichText};
@@ -10,7 +12,24 @@ use super::widgets::{group_menu, sound_header, sound_row};
 enum RowAction {
     Play,
     Stop,
+    Favorite,
     Remove,
+}
+
+fn order_slots(pads: &[Pad], slots: &mut [usize], sort: SoundSort) {
+    slots.sort_by(|&a, &b| {
+        let (first, second) = (&pads[a], &pads[b]);
+        second.favorite.cmp(&first.favorite).then_with(|| match sort {
+            SoundSort::Manual => a.cmp(&b),
+            SoundSort::MostPlayed => second.play_count.cmp(&first.play_count).then(a.cmp(&b)),
+            SoundSort::DateAdded => second.added_at.cmp(&first.added_at).then(a.cmp(&b)),
+            SoundSort::Name => first
+                .name
+                .to_lowercase()
+                .cmp(&second.name.to_lowercase())
+                .then(a.cmp(&b)),
+        })
+    });
 }
 
 impl App {
@@ -109,12 +128,14 @@ impl App {
     fn sound_list(&mut self, ui: &mut egui::Ui) {
         let cells: Vec<PadCell> = self.pad_cells();
         let query = self.search.trim().to_lowercase();
-        let visible: Vec<usize> = cells
+        let mut visible: Vec<usize> = cells
             .iter()
             .enumerate()
             .filter(|(_, c)| c.loaded && (query.is_empty() || c.title.to_lowercase().contains(&query)))
             .map(|(slot, _)| slot)
             .collect();
+        let pads: &[Pad] = self.board.banks.get(self.bank).map(|b| b.pads.as_slice()).unwrap_or(&[]);
+        order_slots(pads, &mut visible, self.settings.sound_sort);
         let total = cells.iter().filter(|c| c.loaded).count();
         let selected = self.selected;
         let selected_loaded = cells.get(selected).is_some_and(|c| c.loaded);
@@ -147,7 +168,9 @@ impl App {
         let scroll = nav_target.is_some();
 
         let mut add_files = false;
-        let mut add_folder = false;
+        let mut link_folder = false;
+        let mut unlink_folder = false;
+        let linked_folder = self.board.banks.get(self.bank).and_then(|b| b.folder.clone());
         let mut clicked: Option<usize> = None;
         let mut double: Option<usize> = None;
         let mut row_menu: Option<(usize, RowAction)> = None;
@@ -163,14 +186,45 @@ impl App {
             if ui.add_enabled(!busy, egui::Button::new("Add files…").min_size(egui::vec2(button_w, 0.0))).clicked() {
                 add_files = true;
             }
-            if ui.add_enabled(!busy, egui::Button::new("Add folder…").min_size(egui::vec2(button_w, 0.0))).clicked() {
-                add_folder = true;
+            if ui
+                .add_enabled(!busy, egui::Button::new("Link folder…").min_size(egui::vec2(button_w, 0.0)))
+                .on_hover_text("Link this category to a folder. Its audio files are added, and browser links save there.")
+                .clicked()
+            {
+                link_folder = true;
             }
         });
+        let mut sort_choice = self.settings.sound_sort;
         ui.horizontal(|ui| {
             let sel = usize::from(selected_loaded);
             ui.label(RichText::new(format!("{total} sounds · {sel} selected")).small().color(MUTED));
+            ui.label(RichText::new("·").small().color(MUTED));
+            match &linked_folder {
+                Some(folder) => {
+                    ui.label(RichText::new(format!("Folder: {}", folder.display())).small().color(MUTED));
+                    if ui.add_enabled(!busy, egui::Button::new("Unlink").small()).clicked() {
+                        unlink_folder = true;
+                    }
+                }
+                None => {
+                    ui.label(RichText::new("No folder linked, links save to Downloads").small().color(MUTED));
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                egui::ComboBox::from_id_salt("sound_sort")
+                    .selected_text(sort_choice.label())
+                    .show_ui(ui, |ui| {
+                        for option in SoundSort::ALL {
+                            ui.selectable_value(&mut sort_choice, option, option.label());
+                        }
+                    });
+                ui.label(RichText::new("Sort").small().color(MUTED));
+            });
         });
+        if sort_choice != self.settings.sound_sort {
+            self.settings.sound_sort = sort_choice;
+            self.save_settings();
+        }
         ui.add_space(4.0);
         sound_header(ui);
 
@@ -207,6 +261,16 @@ impl App {
                             ui.close_menu();
                         }
                         ui.separator();
+                        let favorite_label = if cell.favorite {
+                            "Remove from favorites"
+                        } else {
+                            "Add to favorites"
+                        };
+                        if ui.button(favorite_label).clicked() {
+                            row_menu = Some((slot, RowAction::Favorite));
+                            ui.close_menu();
+                        }
+                        ui.separator();
                         if ui.button(RichText::new("Remove from category").color(DANGER)).clicked() {
                             row_menu = Some((slot, RowAction::Remove));
                             ui.close_menu();
@@ -219,8 +283,11 @@ impl App {
         if add_files {
             self.add_files_to_current();
         }
-        if add_folder {
-            self.add_folder_to_current();
+        if link_folder {
+            self.link_folder_to_current();
+        }
+        if unlink_folder {
+            self.unlink_folder_from_current();
         }
         if let Some(slot) = double.or(clicked).or(nav_target) {
             self.select(slot);
@@ -243,6 +310,7 @@ impl App {
                 RowAction::Stop => {
                     let _ = self.actions.send(Action::Stop(self.bank, slot));
                 }
+                RowAction::Favorite => self.toggle_favorite(slot),
                 RowAction::Remove => self.remove_sound(slot),
             }
         }
@@ -287,9 +355,13 @@ impl App {
             .unwrap_or_else(|| "Folder".into());
         match self.sampler.add_category(name) {
             Ok(index) => {
+                let linked = self.sampler.set_group_folder(index, Some(dir.clone()));
                 self.refresh();
                 self.switch_bank(index);
-                self.import_paths(index, vec![dir]);
+                match linked {
+                    Ok(()) => self.import_paths(index, vec![dir]),
+                    Err(err) => self.status = format!("Error: {err:#}"),
+                }
             }
             Err(err) => self.status = format!("Error: {err:#}"),
         }
@@ -306,12 +378,28 @@ impl App {
         self.import_paths(bank, files);
     }
 
-    fn add_folder_to_current(&mut self) {
+    fn link_folder_to_current(&mut self) {
         let Some(dir) = rfd::FileDialog::new().pick_folder() else {
             return;
         };
         let bank = self.bank;
-        self.import_paths(bank, vec![dir]);
+        match self.sampler.set_group_folder(bank, Some(dir.clone())) {
+            Ok(()) => {
+                self.refresh();
+                self.import_paths(bank, vec![dir]);
+            }
+            Err(err) => self.status = format!("Error: {err:#}"),
+        }
+    }
+
+    fn unlink_folder_from_current(&mut self) {
+        match self.sampler.set_group_folder(self.bank, None) {
+            Ok(()) => {
+                self.refresh();
+                self.status = "Folder unlinked. Browser links will save to Downloads.".into();
+            }
+            Err(err) => self.status = format!("Error: {err:#}"),
+        }
     }
 
     fn confirm_delete_window(&mut self, ctx: &egui::Context) {

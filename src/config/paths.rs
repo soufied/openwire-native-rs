@@ -57,6 +57,10 @@ pub fn data_dir(settings: &Settings) -> Result<PathBuf> {
     }
 }
 
+pub fn downloads_dir(settings: &Settings) -> Result<PathBuf> {
+    Ok(data_dir(settings)?.join("Downloads"))
+}
+
 pub fn presets_dir(settings: &Settings) -> Result<PathBuf> {
     match &settings.presets_dir {
         Some(dir) => Ok(dir.clone()),

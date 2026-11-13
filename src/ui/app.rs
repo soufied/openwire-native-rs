@@ -1,25 +1,27 @@
 use crate::input::keybinds as hotkeys;
 use crate::config::paths;
+use crate::links;
 use std::sync::mpsc;
 use eframe::egui;
 use eframe::egui::{Align2, Color32, FontId, RichText, ViewportCommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use crate::audio::dsp::{DspSnapshot, Params};
 use crate::audio::engine::{CommandSender, InputDevice, Meters};
 use crate::audio::mixer::MixerControl;
 use crate::board::{Pad, Soundboard};
 use crate::config::settings::{AppMode, BoardLayout, Settings};
 use crate::input::keybinds::{Bindings, CaptureSlot, Target};
-use crate::playback::{Action, ImportReport, Sampler};
+use crate::playback::{is_audio_file, Action, ImportReport, Sampler};
 use crate::presets::{ORDINARY_VOICE, PresetStore};
+use crate::system::instance::Message as IpcMessage;
 use crate::system::tray::{TrayCmd, Wake};
 use crate::system::window::{hide_to_tray, show_window};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
-use super::theme::{ACCENT, CARD, DANGER, MUTED, PANEL, TEXT, apply_style};
-use super::widgets::{display_path, dot_label, fmt_time, format_duration, meter, nav_button};
+use super::theme::{ACCENT, ACCENT_SOFT, BG, CARD, CARD_HI, DANGER, MUTED, PANEL, TEXT, apply_style};
+use super::widgets::{display_path, dot_label, fmt_time, format_duration, meter, nav_button, pill, section_label};
 
 pub struct Wiring {
     pub sampler: Arc<Sampler>,
@@ -31,6 +33,7 @@ pub struct Wiring {
     pub settings: Settings,
     pub presets: PresetStore,
     pub tray_rx: Receiver<TrayCmd>,
+    pub ipc_rx: Receiver<IpcMessage>,
     pub engine_commands: Option<CommandSender>,
     pub inputs: Arc<Mutex<Vec<InputDevice>>>,
     pub engine_running: bool,
@@ -42,6 +45,12 @@ pub(crate) struct ImportJob {
     pub(crate) total: Arc<AtomicUsize>,
     pub(crate) done: Arc<AtomicUsize>,
     pub(crate) rx: Receiver<Result<ImportReport, String>>,
+}
+
+pub(crate) struct LinkJob {
+    pub(crate) label: String,
+    pub(crate) group: String,
+    pub(crate) rx: Receiver<Result<String, String>>,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -67,6 +76,8 @@ pub(crate) enum PathAction {
 
 pub(crate) struct PadCell {
     pub(crate) title: String,
+    pub(crate) favorite: bool,
+    pub(crate) plays: u64,
     pub(crate) key: String,
     pub(crate) duration: String,
     pub(crate) loaded: bool,
@@ -85,6 +96,7 @@ pub struct App {
     pub(crate) settings: Settings,
     pub(crate) presets: PresetStore,
     pub(crate) tray_rx: Receiver<TrayCmd>,
+    pub(crate) ipc_rx: Receiver<IpcMessage>,
     pub(crate) engine_commands: Option<CommandSender>,
     pub(crate) inputs: Arc<Mutex<Vec<InputDevice>>>,
     pub(crate) engine_running: bool,
@@ -113,12 +125,16 @@ pub struct App {
     pub(crate) app_mode: AppMode,
     pub(crate) search: String,
     pub(crate) import_job: Option<ImportJob>,
+    pub(crate) link_jobs: Vec<LinkJob>,
+    pub(crate) board_revision: u64,
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(33));
         self.handle_tray(ctx);
+        self.handle_ipc(ctx);
+        self.sync_board();
         self.poll_background();
         self.poll_capture();
 
@@ -142,14 +158,14 @@ impl eframe::App for App {
             .show(ctx, |ui| self.sidebar(ui));
         if self.view == View::Board {
             egui::SidePanel::right("props")
-                .default_width(360.0)
+                .default_width(372.0)
                 .frame(egui::Frame::default().fill(PANEL).inner_margin(egui::Margin::symmetric(12, 10)))
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| self.properties(ui));
                 });
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().inner_margin(egui::Margin::symmetric(16, 12)))
+            .frame(egui::Frame::default().fill(BG).inner_margin(egui::Margin::symmetric(18, 14)))
             .show(ctx, |ui| {
                 self.import_banner(ui);
                 if self.view == View::Board && self.app_mode == AppMode::Soundpad {
@@ -189,6 +205,7 @@ impl App {
             settings: w.settings,
             presets: w.presets,
             tray_rx: w.tray_rx,
+            ipc_rx: w.ipc_rx,
             engine_commands: w.engine_commands,
             inputs: w.inputs,
             engine_running: w.engine_running,
@@ -217,6 +234,8 @@ impl App {
             app_mode,
             search: String::new(),
             import_job: None,
+            link_jobs: Vec::new(),
+            board_revision: 0,
         };
         app.select(0);
         app
@@ -224,6 +243,20 @@ impl App {
 
     pub(crate) fn refresh(&mut self) {
         self.board = self.sampler.snapshot();
+    }
+
+    pub(crate) fn sync_board(&mut self) {
+        let revision = self.sampler.revision();
+        if revision == self.board_revision {
+            return;
+        }
+        self.board_revision = revision;
+        self.refresh();
+        if let (Some(edit), Some(saved)) = (self.edit.as_mut(), self.board.pad(self.bank, self.selected)) {
+            edit.play_count = saved.play_count;
+            edit.favorite = saved.favorite;
+            edit.added_at = saved.added_at;
+        }
     }
 
     pub(crate) fn select(&mut self, slot: usize) {
@@ -312,6 +345,99 @@ impl App {
         if let Some(result) = outcome {
             self.waveform_rx = None;
             self.waveform = result.unwrap_or_default();
+        }
+        self.poll_links();
+    }
+
+    pub(crate) fn handle_ipc(&mut self, ctx: &egui::Context) {
+        while let Ok(message) = self.ipc_rx.try_recv() {
+            match message {
+                IpcMessage::Show => show_window(ctx),
+                IpcMessage::Open(raw) => self.open_link(&raw),
+            }
+        }
+    }
+
+    pub(crate) fn open_link(&mut self, raw: &str) {
+        let Some(url) = links::parse_soundpad_link(raw) else {
+            self.status = "Unsupported link".into();
+            return;
+        };
+        let file = links::file_name_from_url(&url);
+        if !is_audio_file(Path::new(&file)) {
+            self.status = format!("Link is not an audio file: {file}");
+            return;
+        }
+        let bank = self.bank;
+        let Some(group) = self.board.banks.get(bank) else {
+            self.status = "No group selected".into();
+            return;
+        };
+        let group_name = group.name.clone();
+        let folder = match group.folder.clone() {
+            Some(folder) => folder,
+            None => match paths::downloads_dir(&self.settings) {
+                Ok(folder) => folder,
+                Err(err) => {
+                    self.status = format!("Error: {err:#}");
+                    return;
+                }
+            },
+        };
+        let (tx, rx) = mpsc::channel();
+        let sampler = self.sampler.clone();
+        let url_bg = url.clone();
+        let spawned = std::thread::Builder::new()
+            .name("openwire-link".into())
+            .spawn(move || {
+                let outcome = links::fetch_into_group(&sampler, bank, &url_bg, &folder)
+                    .map_err(|err| format!("{err:#}"));
+                let _ = tx.send(outcome);
+            });
+        match spawned {
+            Ok(_) => {
+                self.status = format!("Downloading {file} to {group_name}…");
+                self.link_jobs.push(LinkJob {
+                    label: file,
+                    group: group_name,
+                    rx,
+                });
+            }
+            Err(err) => self.status = format!("Cannot start download: {err}"),
+        }
+    }
+
+    pub(crate) fn toggle_favorite(&mut self, slot: usize) {
+        let favorite = self.board.pad(self.bank, slot).is_some_and(|p| p.favorite);
+        match self.sampler.set_pad_favorite(self.bank, slot, !favorite) {
+            Ok(()) => {
+                self.status = if favorite { "Removed from favorites".into() } else { "Added to favorites".into() };
+                self.refresh();
+            }
+            Err(err) => self.status = format!("Error: {err:#}"),
+        }
+    }
+
+    pub(crate) fn poll_links(&mut self) {
+        let mut index = 0;
+        while index < self.link_jobs.len() {
+            let outcome = match self.link_jobs[index].rx.try_recv() {
+                Ok(outcome) => outcome,
+                Err(mpsc::TryRecvError::Empty) => {
+                    index += 1;
+                    continue;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => Err("download stopped unexpectedly".to_string()),
+            };
+            let job = self.link_jobs.remove(index);
+            match outcome {
+                Ok(sound) => {
+                    self.status = format!("Added \u{201C}{sound}\u{201D} to {}", job.group);
+                    self.refresh();
+                    self.select(self.selected);
+                }
+                Err(err) => self.status = format!("Link \u{201C}{}\u{201D} failed: {err}", job.label),
+            }
         }
     }
 
@@ -432,48 +558,57 @@ impl App {
 
     pub(crate) fn header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("OpenWire").size(20.0).strong().color(ACCENT));
-            ui.add_space(16.0);
+            ui.label(RichText::new("OpenWire").size(19.0).strong().color(ACCENT));
+            ui.add_space(18.0);
             meter(ui, "MIC", self.meters.mic());
+            ui.add_space(6.0);
             meter(ui, "OUT", self.meters.out());
-            ui.add_space(16.0);
-            ui.label(RichText::new(format!("{} active", self.control.active_voices())).color(MUTED));
+            ui.add_space(14.0);
+            let voices = self.control.active_voices();
+            let (fg, bg) = if voices > 0 { (ACCENT, ACCENT_SOFT) } else { (MUTED, CARD_HI) };
+            pill(ui, &format!("{voices} playing"), fg, bg);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let quit = egui::Button::new("Quit");
-                if ui.add(quit).clicked() {
+                if ui.add(egui::Button::new("Quit")).clicked() {
                     self.quitting = true;
                     ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                 }
-                let hide = egui::Button::new("Hide to tray");
-                if ui.add(hide).clicked() {
+                if ui.add(egui::Button::new("Hide to tray")).clicked() {
                     hide_to_tray(ui.ctx());
                 }
                 let stop = egui::Button::new(RichText::new("Stop all").strong().color(Color32::WHITE)).fill(DANGER);
                 if ui.add(stop).clicked() {
                     let _ = self.actions.send(Action::StopAll);
                 }
+                ui.add_space(14.0);
                 let mut monitor = self.sampler.master_monitor();
-                let slider = egui::Slider::new(&mut monitor, 0.0..=1.0)
-                    .text("Monitor")
-                    .show_value(false);
-                if ui.add_sized([150.0, 20.0], slider).changed() {
+                ui.label(RichText::new(format!("{:.0}%", monitor * 100.0)).monospace().color(TEXT));
+                let slider = egui::Slider::new(&mut monitor, 0.0..=1.0).show_value(false);
+                let volume = ui.add_sized([150.0, 20.0], slider);
+                if volume.changed() {
                     self.sampler.set_master_monitor(monitor);
                 }
-                ui.label(RichText::new("ESC").monospace().color(MUTED));
+                if volume.drag_stopped() || (volume.changed() && !volume.dragged()) {
+                    self.settings.master_monitor = monitor;
+                    self.save_settings();
+                }
+                ui.label(RichText::new("VOLUME").small().strong().color(MUTED));
             });
         });
     }
 
     pub(crate) fn sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(10.0);
-        ui.label(RichText::new("SECTIONS").small().color(MUTED));
+        ui.add_space(8.0);
+        section_label(ui, "Play");
         ui.add_space(4.0);
         nav_button(ui, &mut self.view, View::Board, self.app_mode.label());
+        ui.add_space(16.0);
+        section_label(ui, "Control");
+        ui.add_space(4.0);
         let voice_label = if self.snap.voice_enabled { "Voice & DSP" } else { "Voice & DSP (off)" };
         nav_button(ui, &mut self.view, View::Voice, voice_label);
         nav_button(ui, &mut self.view, View::KeyBinds, "Keybinds");
         nav_button(ui, &mut self.view, View::Settings, "Settings");
-        let spare = (ui.available_height() - 28.0).max(0.0);
+        let spare = (ui.available_height() - 72.0).max(0.0);
         ui.add_space(spare);
         let (text, color) = if self.engine_running {
             ("PipeWire connected", ACCENT)
@@ -481,6 +616,8 @@ impl App {
             ("PipeWire unavailable", DANGER)
         };
         dot_label(ui, color, text);
+        ui.add_space(4.0);
+        ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).small().color(MUTED));
     }
 
     pub(crate) fn pad_cells(&self) -> Vec<PadCell> {
@@ -498,7 +635,14 @@ impl App {
                     None => String::new(),
                 };
                 PadCell {
-                    title: if p.name.is_empty() { "empty".into() } else { p.name.clone() },
+                    title: match (p.favorite, p.name.is_empty()) {
+                        (true, true) => "\u{2605} empty".into(),
+                        (true, false) => format!("\u{2605} {}", p.name),
+                        (false, true) => "empty".into(),
+                        (false, false) => p.name.clone(),
+                    },
+                    favorite: p.favorite,
+                    plays: p.play_count,
                     key: p.hotkey.clone().unwrap_or_else(|| "-".into()),
                     duration,
                     loaded: p.is_loaded(),

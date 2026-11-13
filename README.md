@@ -12,7 +12,13 @@ single native Rust binary with an egui interface.
   pause, seek on the waveform, trim, bass boost and per-pad volumes.
 - **Soundpad mode** (Settings → Interface mode): categories with a searchable sound list.
 - **Drag and drop:** drop files or folders into the window. Imports run in the background.
+- **Folders per category:** link a category to a folder. Its audio files are added, and
+  sounds downloaded from browser links are saved there.
+- **Browser links:** open a `soundpad://sound/url/...` link in your browser and OpenWire
+  downloads the sound into the category you have open.
 - **Multi-play** (Settings → Behavior): off by default, so a new sound stops the playing one.
+- **Favorites and play counts:** mark a sound as a favorite to keep it at the top of its
+  category. Each sound counts its plays. Sort by manual order, most played, date added or name.
 - **Keybinds:** any key, including numpad and media keys, bound to a pad or a playback action.
 - **Voice & DSP:** presets, pitch, formant, equalizer, radio effect, noise gate, ducking.
   A switch at the top bypasses all processing, so your microphone is sent unprocessed.
@@ -48,6 +54,19 @@ sudo usermod -aG input "$USER"
 
 Log out and back in afterwards.
 
+## Browser links
+
+The package installs `/usr/share/applications/mimeapps.list`, which makes OpenWire the default
+handler for `soundpad:` links. To choose a different handler for your user only:
+
+```bash
+xdg-mime default openwire.desktop x-scheme-handler/soundpad
+```
+
+Then click the sound button on the website and allow the browser to open it with OpenWire.
+If OpenWire is already running, the link is handed to it. A linked folder receives the file;
+without one, sounds go to the `Downloads` folder inside your data folder.
+
 ## Files
 
 - Settings: `~/.config/OpenWire/settings.toml`
@@ -55,6 +74,7 @@ Log out and back in afterwards.
   On first start the soundboard and presets are copied from the old `~/Documents/OpenWire/`.
 
 Sound files are referenced in place. Removing a pad or a sound never deletes the audio file.
+Downloaded browser links go to the linked folder of the category, or to `Downloads` in the data folder.
 
 ## Troubleshooting
 
